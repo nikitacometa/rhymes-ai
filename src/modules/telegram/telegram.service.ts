@@ -48,7 +48,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.bot.telegram.setMyCommands([
       { command: 'start', description: 'Начать работу с ботом' },
       { command: 'help', description: 'Справка по командам' },
-      { command: 'search', description: 'Найти рифмы к слову/фразе' },
+      { command: 'search', description: 'Найти рифмы в базе' },
+      { command: 'ai', description: '🤖 Придумать рифмы (LLM)' },
+      { command: 'full', description: '🔥 База + AI вместе' },
       { command: 'add', description: 'Добавить рифму вручную' },
       { command: 'stats', description: 'Статистика базы рифм' },
       { command: 'compare', description: 'Сравнить две фразы на рифму' },
@@ -66,6 +68,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     // /search <phrase>
     this.bot.command('search', this.handleSearch.bind(this));
+
+    // /ai <phrase> — только LLM
+    this.bot.command('ai', this.handleAI.bind(this));
+
+    // /full <phrase> — БД + LLM
+    this.bot.command('full', this.handleFull.bind(this));
 
     // /add — начинает диалог добавления
     this.bot.command('add', this.handleAddStart.bind(this));
@@ -110,30 +118,20 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleHelp(ctx: Context) {
-    const helpMessage = `
-📖 *Команды RhymePadre*
+    const hasLLM = this.rhymeService.hasLLM();
+    const helpMessage = `📖 Команды RhymePadre
 
-/search <фраза>
-Поиск рифм к слову или фразе
-_Пример: /search пол-оскала_
+/search <фраза> — поиск в базе
+/ai <фраза> — 🤖 AI придумает рифмы${!hasLLM ? ' (нужен API ключ)' : ''}
+/full <фраза> — 🔥 база + AI вместе
 
-/compare фраза1 | фраза2
-Проверить, рифмуются ли две фразы
-_Пример: /compare Ла Скала | пол-оскала_
+/compare фраза1 | фраза2 — сравнить
+/stats — статистика
 
-/add
-Добавить рифму вручную (в разработке)
+📎 Импорт: отправь .txt или .md файл
 
-/stats
-Показать статистику базы рифм
-
-📎 *Импорт файлов*
-Отправь .txt или .md файл с текстами треков.
-Формат: заголовки ## Название, секции [Куплет], [Припев]
-
-💡 *Просто напиши слово* — бот автоматически найдёт рифмы.
-`;
-    await ctx.replyWithMarkdown(helpMessage);
+💡 Просто напиши слово — поиск в базе`;
+    await ctx.reply(helpMessage);
   }
 
   private async handleSearch(ctx: Context) {
@@ -141,11 +139,41 @@ _Пример: /compare Ла Скала | пол-оскала_
     const phrase = text.replace(/^\/search\s*/i, '').trim();
 
     if (!phrase) {
-      await ctx.reply('Укажи фразу для поиска: /search <фраза>');
+      await ctx.reply('Укажи фразу: /search <фраза>');
       return;
     }
 
-    await this.searchAndReply(ctx, phrase);
+    await this.searchAndReply(ctx, phrase, false);
+  }
+
+  private async handleAI(ctx: Context) {
+    const text = (ctx.message as { text?: string })?.text || '';
+    const phrase = text.replace(/^\/ai\s*/i, '').trim();
+
+    if (!phrase) {
+      await ctx.reply('Укажи фразу: /ai <фраза>');
+      return;
+    }
+
+    if (!this.rhymeService.hasLLM()) {
+      await ctx.reply('❌ AI недоступен (не настроен OPENAI_API_KEY)');
+      return;
+    }
+
+    await ctx.sendChatAction('typing');
+    await this.replyWithLLMRhymes(ctx, phrase);
+  }
+
+  private async handleFull(ctx: Context) {
+    const text = (ctx.message as { text?: string })?.text || '';
+    const phrase = text.replace(/^\/full\s*/i, '').trim();
+
+    if (!phrase) {
+      await ctx.reply('Укажи фразу: /full <фраза>');
+      return;
+    }
+
+    await this.searchAndReply(ctx, phrase, true);
   }
 
   private async handleAddStart(ctx: Context) {
@@ -279,14 +307,17 @@ _Пример: /compare Ла Скала | пол-оскала_
     // Игнорируем команды (они обрабатываются отдельно)
     if (text.startsWith('/')) return;
 
-    await this.searchAndReply(ctx, text);
+    await this.searchAndReply(ctx, text, false);
   }
 
   // =====================================================
-  // SEARCH HELPER
+  // SEARCH HELPERS
   // =====================================================
 
-  private async searchAndReply(ctx: Context, phrase: string) {
+  /**
+   * Поиск в БД + опционально LLM
+   */
+  private async searchAndReply(ctx: Context, phrase: string, includeLLM: boolean) {
     try {
       await ctx.sendChatAction('typing');
 
@@ -295,42 +326,100 @@ _Пример: /compare Ла Скала | пол-оскала_
         limit: 5,
       });
 
-      if (results.length === 0) {
-        // Показываем фонетику запроса для отладки
+      let message = '';
+      const hasDBResults = results.length > 0;
+
+      // БД результаты
+      if (hasDBResults) {
+        message += `📚 Из базы "${phrase}":\n\n`;
+
+        for (const family of results) {
+          const complexity = '⭐'.repeat(family.complexity);
+          message += `${complexity} ${family.patternText}\n`;
+
+          const familyWithUnits = family as typeof family & { units?: { textSpan: string }[] };
+          if (familyWithUnits.units && familyWithUnits.units.length > 0) {
+            const examples = familyWithUnits.units
+              .slice(0, 3)
+              .map(u => `• ${u.textSpan}`)
+              .join('\n');
+            message += `${examples}\n`;
+          }
+          message += '\n';
+        }
+      }
+
+      // LLM результаты
+      if (includeLLM && this.rhymeService.hasLLM()) {
+        if (hasDBResults) {
+          await ctx.reply(message);
+          message = '';
+        }
+        await ctx.sendChatAction('typing');
+        await this.replyWithLLMRhymes(ctx, phrase);
+        return;
+      }
+
+      // Если нет результатов в БД и не просили LLM
+      if (!hasDBResults && !includeLLM) {
         const analysis = this.phoneticService.analyzeSync(phrase);
+        const hint = this.rhymeService.hasLLM() 
+          ? '\n\n💡 Попробуй /ai ' + phrase + ' для AI-рифм'
+          : '';
         
         await ctx.reply(
-          `🔍 По запросу "${phrase}" рифм не найдено.\n\n` +
-          `Фонетический хвост: [${analysis.phoneticTail}]\n\n` +
-          `Попробуй импортировать тексты через файл (.txt, .md)`
+          `🔍 По запросу "${phrase}" рифм не найдено.\n` +
+          `Фонетика: [${analysis.phoneticTail}]` +
+          hint
         );
         return;
       }
 
-      let message = `🎤 Рифмы к "${phrase}":\n\n`;
-
-      for (const family of results) {
-        const complexity = '⭐'.repeat(family.complexity);
-        message += `${complexity} ${family.patternText}\n`;
-        message += `[${family.phoneticTail}]\n`;
-
-        // Показываем примеры из units (если include сработал)
-        const familyWithUnits = family as typeof family & { units?: { textSpan: string }[] };
-        if (familyWithUnits.units && familyWithUnits.units.length > 0) {
-          const examples = familyWithUnits.units
-            .slice(0, 3)
-            .map(u => `• ${u.textSpan}`)
-            .join('\n');
-          message += `${examples}\n`;
-        }
-        
-        message += '\n';
+      if (message) {
+        await ctx.reply(message);
       }
-
-      await ctx.reply(message);
     } catch (error) {
       console.error('Search error:', error);
       await ctx.reply('❌ Ошибка поиска: ' + (error as Error).message);
+    }
+  }
+
+  /**
+   * Генерация рифм через LLM
+   */
+  private async replyWithLLMRhymes(ctx: Context, phrase: string) {
+    try {
+      const suggestions = await this.rhymeService.suggestRhymesWithLLM(phrase);
+
+      if (suggestions.length === 0) {
+        await ctx.reply('🤖 AI не смог придумать рифмы. Попробуй другое слово.');
+        return;
+      }
+
+      const typeEmoji: Record<string, string> = {
+        exact: '✅',
+        slant: '🔶',
+        assonance: '🔷',
+        pun: '🎭',
+      };
+
+      let message = `🤖 AI рифмы к "${phrase}":\n\n`;
+
+      for (const s of suggestions) {
+        const emoji = typeEmoji[s.type] || '•';
+        message += `${emoji} ${s.rhyme}`;
+        if (s.explanation) {
+          message += ` — ${s.explanation}`;
+        }
+        message += '\n';
+      }
+
+      message += '\n✅точная 🔶неточная 🔷ассонанс 🎭каламбур';
+
+      await ctx.reply(message);
+    } catch (error) {
+      console.error('LLM rhyme error:', error);
+      await ctx.reply('❌ Ошибка AI: ' + (error as Error).message);
     }
   }
 }

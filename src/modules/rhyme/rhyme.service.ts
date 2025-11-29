@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { PhoneticService } from '../phonetic/phonetic.service';
 import {
@@ -9,6 +10,7 @@ import {
   SearchRhymeDto,
 } from './dto';
 import { RhymeFamily, RhymeExample, RhymeUnit, RhymeLink, Prisma } from '@prisma/client';
+import OpenAI from 'openai';
 
 // Тип для семейства с включёнными связями
 type RhymeFamilyWithRelations = RhymeFamily & {
@@ -16,12 +18,24 @@ type RhymeFamilyWithRelations = RhymeFamily & {
   examples?: RhymeExample[];
 };
 
+/** Результат LLM-генерации рифм */
+export interface LLMRhymeSuggestion {
+  rhyme: string;
+  type: 'exact' | 'slant' | 'assonance' | 'pun';
+  explanation?: string;
+}
+
 @Injectable()
 export class RhymeService {
+  private openaiApiKey: string;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly phoneticService: PhoneticService,
-  ) {}
+    private readonly configService: ConfigService,
+  ) {
+    this.openaiApiKey = this.configService.get<string>('OPENAI_API_KEY') || '';
+  }
 
   // =====================================================
   // RHYME FAMILIES
@@ -355,5 +369,68 @@ export class RhymeService {
         createdBy: 'USER',
       },
     });
+  }
+
+  // =====================================================
+  // LLM RHYME GENERATION
+  // =====================================================
+
+  /**
+   * Генерирует рифмы с помощью LLM
+   */
+  async suggestRhymesWithLLM(word: string): Promise<LLMRhymeSuggestion[]> {
+    if (!this.openaiApiKey) {
+      return [];
+    }
+
+    const openai = new OpenAI({ apiKey: this.openaiApiKey });
+
+    const prompt = `Ты — эксперт по русским рифмам в рэпе и поэзии.
+
+Придумай 5-7 интересных рифм к слову/фразе: "${word}"
+
+Требования:
+- Рифмы должны быть разнообразными (точные, неточные, ассонансы, каламбуры)
+- Предпочтение нестандартным, креативным рифмам
+- Можно использовать фразы из нескольких слов
+- Рифмы на русском языке
+
+Верни JSON массив (без markdown):
+[
+  {"rhyme": "рифма", "type": "exact|slant|assonance|pun", "explanation": "пояснение если нужно"}
+]
+
+Типы:
+- exact: точная рифма (кошка/ложка)
+- slant: неточная рифма (любовь/морковь)  
+- assonance: созвучие гласных
+- pun: каламбур/игра слов`;
+
+    try {
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.8,
+        max_tokens: 500,
+      });
+
+      const content = response.choices[0]?.message?.content;
+      if (!content) return [];
+
+      const jsonMatch = content.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) return [];
+
+      return JSON.parse(jsonMatch[0]) as LLMRhymeSuggestion[];
+    } catch (error) {
+      console.error('LLM rhyme suggestion failed:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Проверяет, доступен ли LLM
+   */
+  hasLLM(): boolean {
+    return !!this.openaiApiKey;
   }
 }
