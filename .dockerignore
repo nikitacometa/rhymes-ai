@@ -1,0 +1,34 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test
+coverage
+*.spec.ts
+
+# Misc
+*.md
+!README.md
+.env*
+!.env.example
+scripts/
+sample_*.md
+rhyme-dictionary*.md
+bad-*.md
+

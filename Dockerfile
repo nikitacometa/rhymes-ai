@@ -1,29 +1,46 @@
+# ==========================================
+# Stage 1: Build
+# ==========================================
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Копируем package files
 COPY package*.json ./
 COPY prisma ./prisma/
 
-RUN npm ci
+# Устанавливаем ВСЕ зависимости (нужны dev для сборки)
+RUN npm ci --ignore-scripts
 
+# Копируем исходники
 COPY . .
 
-RUN npm run prisma:generate
+# Генерируем Prisma клиент и собираем
+RUN npx prisma generate
 RUN npm run build
 
+# ==========================================
+# Stage 2: Production
+# ==========================================
 FROM node:20-alpine AS runner
 
 WORKDIR /app
 
+# Копируем package files
+COPY package*.json ./
+COPY prisma ./prisma/
+
+# Устанавливаем ТОЛЬКО production зависимости
+RUN npm ci --omit=dev --ignore-scripts
+
+# Генерируем Prisma клиент (нужен в runtime)
+RUN npx prisma generate
+
+# Копируем собранное приложение
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package*.json ./
-COPY --from=builder /app/prisma ./prisma
 
 ENV NODE_ENV=production
 
 EXPOSE 3000
 
-CMD ["npm", "run", "start:prod"]
-
+CMD ["node", "dist/main.js"]
