@@ -1,12 +1,18 @@
 /**
  * Генерация словаря рифм из sample_rhymes_texts_oxxymiron.md
  * 
- * Запуск без LLM:  npx ts-node scripts/generate-rhyme-dictionary.ts
- * Запуск с LLM:    OPENAI_API_KEY=sk-xxx npx ts-node scripts/generate-rhyme-dictionary.ts
+ * Запуск: npx ts-node scripts/generate-rhyme-dictionary.ts
+ * 
+ * Автоматически загружает OPENAI_API_KEY из .env
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as dotenv from 'dotenv';
+
+// Загружаем .env
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
+
 import { parseFullText } from '../src/modules/parser/utils/text-parser';
 import { 
   extractRhymes, 
@@ -17,6 +23,7 @@ import {
 
 const SAMPLE_FILE = path.join(__dirname, '..', 'sample_rhymes_texts_oxxymiron.md');
 const OUTPUT_FILE = path.join(__dirname, '..', 'rhyme-dictionary.md');
+const OUTPUT_FILE_LLM = path.join(__dirname, '..', 'rhyme-dictionary-llm.md');
 
 // API key из env
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -105,8 +112,10 @@ async function main() {
   console.log('\n📝 Генерируем словарь...');
   const dictionary = generateDictionary(allRhymes, tracks.length, llmRhymes.length);
   
-  fs.writeFileSync(OUTPUT_FILE, dictionary, 'utf-8');
-  console.log(`   Сохранено: ${OUTPUT_FILE}`);
+  // Сохраняем в нужный файл
+  const outputFile = OPENAI_API_KEY ? OUTPUT_FILE_LLM : OUTPUT_FILE;
+  fs.writeFileSync(outputFile, dictionary, 'utf-8');
+  console.log(`   Сохранено: ${outputFile}`);
   console.log('\n✅ Готово!');
 }
 
@@ -156,33 +165,33 @@ function generateDictionary(rhymes: Map<string, RhymeEntry>, trackCount: number,
   // Header
   lines.push('# Словарь рифм Oxxxymiron');
   lines.push('');
-  lines.push(`> Автоматически извлечено из miXXXtape I (${trackCount} треков)`);
+  lines.push(`> miXXXtape I (${trackCount} треков)`);
   lines.push('');
-  lines.push(`**Всего рифмо-паттернов:** ${entries.length}`);
+  lines.push(`**Рифмо-паттернов:** ${entries.length}`);
   if (llmCount > 0) {
     lines.push(`**Креативных (LLM):** ${llmEntries.length}`);
   }
   lines.push('');
+  lines.push('---');
+  lines.push('');
 
   // LLM-рифмы (каламбуры, креативные)
   if (llmEntries.length > 0) {
-    lines.push('## 🎭 Креативные рифмы (найдены LLM)');
+    lines.push('## 🎭 Креативные рифмы');
     lines.push('');
     for (const entry of llmEntries) {
-      lines.push(formatEntry(entry));
+      lines.push(formatEntryAsPoem(entry));
     }
-    lines.push('');
   }
 
   // Топ рифмы (4+ варианта)
   const topRhymes = ruleEntries.filter(e => e.variants.length >= 4);
   if (topRhymes.length > 0) {
-    lines.push('## 🏆 Топ (4+ варианта)');
+    lines.push('## 🏆 Топ');
     lines.push('');
     for (const entry of topRhymes) {
-      lines.push(formatEntry(entry));
+      lines.push(formatEntryAsPoem(entry));
     }
-    lines.push('');
   }
 
   // Все рифмы
@@ -190,16 +199,30 @@ function generateDictionary(rhymes: Map<string, RhymeEntry>, trackCount: number,
   lines.push('');
   
   for (const entry of ruleEntries) {
-    lines.push(formatEntry(entry));
+    lines.push(formatEntryAsPoem(entry));
   }
 
   return lines.join('\n');
 }
 
-function formatEntry(entry: RhymeEntry): string {
-  const variants = entry.variants.join(' / ');
-  const suffix = entry.explanation ? ` _(${entry.explanation})_` : '';
-  return `- ${variants}${suffix}`;
+/** Форматирует рифму как блок-стихотворение */
+function formatEntryAsPoem(entry: RhymeEntry): string {
+  const lines: string[] = [];
+  
+  // Каждый вариант на новой строке
+  for (const variant of entry.variants) {
+    lines.push(variant);
+  }
+  
+  // Пояснение если есть
+  if (entry.explanation) {
+    lines.push(`_${entry.explanation}_`);
+  }
+  
+  // Пустая строка после блока
+  lines.push('');
+  
+  return lines.join('\n');
 }
 
 main().catch(console.error);
