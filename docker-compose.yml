@@ -1,28 +1,38 @@
 version: '3.8'
 
 services:
+  # ==========================================
+  # PostgreSQL Database
+  # ==========================================
   postgres:
     image: postgres:15-alpine
     container_name: rhymepadre-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: rhymepadre
-      POSTGRES_PASSWORD: rhymepadre
-      POSTGRES_DB: rhymepadre
+      POSTGRES_USER: ${POSTGRES_USER:-rhymepadre}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rhymepadre}
+      POSTGRES_DB: ${POSTGRES_DB:-rhymepadre}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rhymepadre"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rhymepadre}"]
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - rhymepadre-network
 
+  # ==========================================
+  # Redis (for BullMQ queues)
+  # ==========================================
   redis:
     image: redis:7-alpine
     container_name: rhymepadre-redis
+    restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -30,8 +40,48 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - rhymepadre-network
+
+  # ==========================================
+  # RhymePadre API + Telegram Bot
+  # ==========================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rhymepadre-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      # Database
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rhymepadre}:${POSTGRES_PASSWORD:-rhymepadre}@postgres:5432/${POSTGRES_DB:-rhymepadre}?schema=public
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # Telegram Bot
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      # OpenAI (optional, for LLM phonetics)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # App
+      NODE_ENV: production
+      PORT: 3000
+    networks:
+      - rhymepadre-network
+    # Run migrations before starting
+    command: >
+      sh -c "npx prisma migrate deploy && npm run start:prod"
 
 volumes:
   postgres_data:
   redis_data:
 
+networks:
+  rhymepadre-network:
+    driver: bridge
