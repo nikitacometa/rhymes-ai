@@ -1,0 +1,164 @@
+// Prisma Schema для RhymePadre
+// Это файл конфигурации базы данных
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================
+// МОДЕЛИ ДАННЫХ
+// =====================================================
+
+// Семейство рифм — группа фонетически похожих рифм
+// Например: "пол-оскала / Ла Скала / полоскала / поласкала"
+model RhymeFamily {
+  id           String   @id @default(uuid())
+  slug         String   @unique // человекочитаемый идентификатор
+  language     Language @default(RU)
+  patternText  String   @map("pattern_text") // опорная форма/пример
+  phoneticKey  String   @map("phonetic_key") // нормализованный фонетический ключ
+  phoneticFull String?  @map("phonetic_full") // полная фонемная запись
+  phoneticTail String   @map("phonetic_tail") // хвост фонем (для поиска рифм)
+  
+  types       RhymeType[] // типы рифмы: end, internal, multisyllabic...
+  complexity  Int         @default(1) // сложность 1-5
+  topics      String[]    // темы: battle, london, religion...
+  
+  createdBy   CreatedBy @default(IMPORT) @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  // Связи
+  units    RhymeUnit[]
+  examples RhymeExample[]
+
+  @@index([phoneticTail])
+  @@index([phoneticKey])
+  @@map("rhyme_families")
+}
+
+// Пример рифмы — конкретная строка из текста
+model RhymeExample {
+  id          String  @id @default(uuid())
+  familyId    String? @map("family_id")
+  sourceTitle String  @map("source_title") // альбом/микстейп
+  track       String // название трека
+  section     String? // "Куплет 1", "Припев"
+  lineIndex   Int     @map("line_index")
+  text        String // полный текст строки
+  note        String? // заметка
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Связи
+  family RhymeFamily? @relation(fields: [familyId], references: [id])
+  units  RhymeUnit[]
+
+  @@index([familyId])
+  @@map("rhyme_examples")
+}
+
+// Рифмо-юнит — атомарный рифмующийся фрагмент (слово/фраза)
+model RhymeUnit {
+  id           String  @id @default(uuid())
+  familyId     String? @map("family_id")
+  exampleId    String  @map("example_id")
+  lineIndex    Int     @map("line_index")
+  textSpan     String  @map("text_span") // конкретный кусок текста
+  charStart    Int     @map("char_start") // позиция начала в строке
+  charEnd      Int     @map("char_end") // позиция конца
+  phoneticFull String? @map("phonetic_full") // фонемная запись
+  phoneticTail String? @map("phonetic_tail") // хвост фонем
+  stressPattern String? @map("stress_pattern") // паттерн ударений "0 1 0"
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Связи
+  family  RhymeFamily?  @relation(fields: [familyId], references: [id])
+  example RhymeExample  @relation(fields: [exampleId], references: [id], onDelete: Cascade)
+  
+  // Связи между рифмующимися юнитами
+  linksAsA RhymeLink[] @relation("UnitA")
+  linksAsB RhymeLink[] @relation("UnitB")
+
+  @@index([familyId])
+  @@index([exampleId])
+  @@index([phoneticTail])
+  @@map("rhyme_units")
+}
+
+// Связь между рифмующимися юнитами
+// Это НОВАЯ таблица, которой не было в исходном PRD
+model RhymeLink {
+  id                 String    @id @default(uuid())
+  unitAId            String    @map("unit_a_id")
+  unitBId            String    @map("unit_b_id")
+  matchType          MatchType @default(EXACT) @map("match_type")
+  phoneticSimilarity Float     @default(0) @map("phonetic_similarity") // 0.0 - 1.0
+  distanceLines      Int       @default(0) @map("distance_lines") // расстояние в строках
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Связи
+  unitA RhymeUnit @relation("UnitA", fields: [unitAId], references: [id], onDelete: Cascade)
+  unitB RhymeUnit @relation("UnitB", fields: [unitBId], references: [id], onDelete: Cascade)
+
+  @@unique([unitAId, unitBId])
+  @@index([unitAId])
+  @@index([unitBId])
+  @@map("rhyme_links")
+}
+
+// Кэш фонетизации — чтобы не вызывать LLM повторно
+model PhoneticCache {
+  id           String   @id @default(uuid())
+  text         String   @unique // исходный текст
+  language     Language @default(RU)
+  phoneticFull String   @map("phonetic_full")
+  phoneticTail String   @map("phonetic_tail")
+  stressPattern String? @map("stress_pattern")
+  source       String   @default("rules") // "rules" или "llm"
+  
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([text])
+  @@map("phonetic_cache")
+}
+
+// =====================================================
+// ENUMS
+// =====================================================
+
+enum Language {
+  RU
+  EN
+  MIXED
+}
+
+enum RhymeType {
+  END          // концевая рифма
+  INTERNAL     // внутренняя рифма
+  MULTISYLLABIC // мультисиллабическая (2+ слога)
+  SLANT        // приблизительная рифма
+  CHAIN        // цепочка рифм
+  PUN          // каламбур/омофон
+}
+
+enum MatchType {
+  EXACT      // точное совпадение
+  SLANT      // приблизительное
+  ASSONANCE  // совпадение гласных
+  CONSONANCE // совпадение согласных
+}
+
+enum CreatedBy {
+  USER
+  IMPORT
+  GENERATED
+}
+
