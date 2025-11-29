@@ -159,15 +159,13 @@ _Пример: /compare Ла Скала | пол-оскала_
     try {
       const stats = await this.rhymeService.getStats();
       
-      const message = `
-📊 *Статистика RhymePadre*
+      const message = `📊 Статистика RhymePadre
 
 Семейств рифм: ${stats.familiesCount}
 Примеров (строк): ${stats.examplesCount}
 Рифмо-юнитов: ${stats.unitsCount}
-Связей: ${stats.linksCount}
-`;
-      await ctx.replyWithMarkdown(message);
+Связей: ${stats.linksCount}`;
+      await ctx.reply(message);
     } catch (error) {
       console.error('Stats error:', error);
       await ctx.reply('❌ Ошибка получения статистики');
@@ -196,8 +194,7 @@ _Пример: /compare Ла Скала | пол-оскала_
         'CONSONANCE': 'Консонанс',
       };
 
-      const message = `
-${emoji} *Сравнение рифм*
+      const message = `${emoji} Сравнение рифм
 
 "${parts[0]}" ↔ "${parts[1]}"
 
@@ -205,10 +202,8 @@ ${emoji} *Сравнение рифм*
 Тип: ${result.matchType ? matchTypeRu[result.matchType] || result.matchType : 'Не рифмуется'}
 Рифма: ${result.isRhyme ? 'Да' : 'Нет'}
 
-_Фонетика:_
-\`${result.analysisA.phoneticTail}\` ↔ \`${result.analysisB.phoneticTail}\`
-`;
-      await ctx.replyWithMarkdown(message);
+Фонетика: [${result.analysisA.phoneticTail}] ↔ [${result.analysisB.phoneticTail}]`;
+      await ctx.reply(message);
     } catch (error) {
       console.error('Compare error:', error);
       await ctx.reply('❌ Ошибка сравнения');
@@ -256,17 +251,15 @@ _Фонетика:_
       const sourceTitle = fileName.replace(/\.(txt|md)$/, '');
       const result = await this.parserService.parseAndSave(text, sourceTitle, Language.RU);
 
-      const message = `
-✅ *Импорт завершён!*
+      const msg = `✅ Импорт завершён!
 
 📁 Файл: ${fileName}
 🎵 Треков: ${result.tracksProcessed}
 👨‍👩‍👧‍👦 Семейств рифм: ${result.familiesCreated}
 📝 Юнитов: ${result.unitsCreated}
 🔗 Связей: ${result.linksCreated}
-📄 Примеров: ${result.examplesCreated}
-`;
-      await ctx.replyWithMarkdown(message);
+📄 Примеров: ${result.examplesCreated}`;
+      await ctx.reply(msg);
     } catch (error) {
       console.error('Document import error:', error);
       await ctx.reply('❌ Ошибка импорта файла: ' + (error as Error).message);
@@ -306,20 +299,20 @@ _Фонетика:_
         // Показываем фонетику запроса для отладки
         const analysis = this.phoneticService.analyzeSync(phrase);
         
-        await ctx.replyWithMarkdown(
-          `🔍 По запросу "*${phrase}*" рифм не найдено.\n\n` +
-          `_Фонетический хвост: \`${analysis.phoneticTail}\`_\n\n` +
+        await ctx.reply(
+          `🔍 По запросу "${phrase}" рифм не найдено.\n\n` +
+          `Фонетический хвост: [${analysis.phoneticTail}]\n\n` +
           `Попробуй импортировать тексты через файл (.txt, .md)`
         );
         return;
       }
 
-      let message = `🎤 *Рифмы к "${phrase}":*\n\n`;
+      let message = `🎤 Рифмы к "${phrase}":\n\n`;
 
       for (const family of results) {
         const complexity = '⭐'.repeat(family.complexity);
-        message += `${complexity} *${family.patternText}*\n`;
-        message += `_Фонетика: \`${family.phoneticTail}\`_\n`;
+        message += `${complexity} ${family.patternText}\n`;
+        message += `[${family.phoneticTail}]\n`;
 
         // Показываем примеры из units (если include сработал)
         const familyWithUnits = family as typeof family & { units?: { textSpan: string }[] };
@@ -334,7 +327,7 @@ _Фонетика:_
         message += '\n';
       }
 
-      await ctx.replyWithMarkdown(message);
+      await ctx.reply(message);
     } catch (error) {
       console.error('Search error:', error);
       await ctx.reply('❌ Ошибка поиска: ' + (error as Error).message);
