@@ -36,6 +36,17 @@ export class RhymeController {
     return this.rhymeService.search(dto);
   }
 
+  @Get('search/detailed')
+  async searchDetailed(
+    @Query('phrase') phrase: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.rhymeService.searchWithSimilarity(
+      phrase,
+      limit ? parseInt(limit, 10) : 10,
+    );
+  }
+
   // =====================================================
   // STATS
   // =====================================================

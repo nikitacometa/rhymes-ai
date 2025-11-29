@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { PhoneticService } from '../phonetic/phonetic.service';
 import {
   CreateRhymeFamilyDto,
   CreateRhymeExampleDto,
@@ -7,11 +8,20 @@ import {
   CreateRhymeLinkDto,
   SearchRhymeDto,
 } from './dto';
-import { RhymeFamily, RhymeExample, RhymeUnit, RhymeLink } from '@prisma/client';
+import { RhymeFamily, RhymeExample, RhymeUnit, RhymeLink, Prisma } from '@prisma/client';
+
+// Тип для семейства с включёнными связями
+type RhymeFamilyWithRelations = RhymeFamily & {
+  units?: (RhymeUnit & { example?: RhymeExample })[];
+  examples?: RhymeExample[];
+};
 
 @Injectable()
 export class RhymeService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly phoneticService: PhoneticService,
+  ) {}
 
   // =====================================================
   // RHYME FAMILIES
@@ -23,7 +33,7 @@ export class RhymeService {
     });
   }
 
-  async findAllFamilies(limit = 100): Promise<RhymeFamily[]> {
+  async findAllFamilies(limit = 100): Promise<RhymeFamilyWithRelations[]> {
     return this.prisma.rhymeFamily.findMany({
       take: limit,
       orderBy: { createdAt: 'desc' },
@@ -34,7 +44,7 @@ export class RhymeService {
     });
   }
 
-  async findFamilyById(id: string): Promise<RhymeFamily> {
+  async findFamilyById(id: string): Promise<RhymeFamilyWithRelations> {
     const family = await this.prisma.rhymeFamily.findUnique({
       where: { id },
       include: {
@@ -50,7 +60,7 @@ export class RhymeService {
     return family;
   }
 
-  async findFamilyBySlug(slug: string): Promise<RhymeFamily | null> {
+  async findFamilyBySlug(slug: string): Promise<RhymeFamilyWithRelations | null> {
     return this.prisma.rhymeFamily.findUnique({
       where: { slug },
       include: {
@@ -158,7 +168,6 @@ export class RhymeService {
   }
 
   async createManyLinks(links: CreateRhymeLinkDto[]): Promise<{ count: number }> {
-    // Используем skipDuplicates чтобы не падать на дубликатах
     return this.prisma.rhymeLink.createMany({
       data: links,
       skipDuplicates: true,
@@ -181,43 +190,119 @@ export class RhymeService {
   // SEARCH — главная функция поиска рифм
   // =====================================================
 
-  async search(dto: SearchRhymeDto): Promise<RhymeFamily[]> {
-    const { phrase, language, type, limit } = dto;
+  async search(dto: SearchRhymeDto): Promise<RhymeFamilyWithRelations[]> {
+    const { phrase, language, type, limit = 10 } = dto;
 
-    // Пока простой поиск по phoneticTail
-    // В будущем здесь будет фонетизация phrase и поиск по похожести
-    const where: Record<string, unknown> = {};
+    // 1. Фонетизируем входную фразу
+    const analysis = this.phoneticService.analyzeSync(phrase);
+    const inputTail = analysis.phoneticTail;
 
-    // Поиск по phoneticTail (подстрока)
-    if (phrase) {
+    // 2. Строим запрос
+    const where: Prisma.RhymeFamilyWhereInput = {};
+
+    // Поиск по phoneticTail (основной метод)
+    if (inputTail && inputTail.length >= 2) {
+      // Ищем семейства, чей phoneticTail похож на наш
       where.OR = [
-        { phoneticTail: { contains: phrase.toLowerCase() } },
+        // Точное совпадение хвоста
+        { phoneticTail: inputTail },
+        // Частичное совпадение (наш хвост содержится в их)
+        { phoneticTail: { contains: inputTail } },
+        // Их хвост содержится в нашем
+        { phoneticTail: { startsWith: inputTail.slice(-3) } },
+        // Fallback: поиск по тексту
+        { patternText: { contains: phrase, mode: 'insensitive' } },
+        { phoneticKey: { contains: inputTail } },
+      ];
+    } else {
+      // Если хвост слишком короткий — поиск по тексту
+      where.OR = [
         { patternText: { contains: phrase, mode: 'insensitive' } },
         { phoneticKey: { contains: phrase.toLowerCase() } },
       ];
     }
 
+    // Фильтр по языку
     if (language) {
       where.language = language;
     }
 
+    // Фильтр по типу рифмы
     if (type) {
       where.types = { has: type };
     }
 
-    return this.prisma.rhymeFamily.findMany({
+    // 3. Выполняем запрос
+    const families = await this.prisma.rhymeFamily.findMany({
       where,
-      take: limit,
-      orderBy: { complexity: 'desc' },
+      take: limit * 2, // Берём больше для фильтрации
+      orderBy: [
+        { complexity: 'desc' },
+        { createdAt: 'desc' },
+      ],
       include: {
         units: {
           include: {
             example: true,
           },
+          take: 5, // Ограничиваем юниты
         },
-        examples: true,
+        examples: {
+          take: 3, // Ограничиваем примеры
+        },
       },
     });
+
+    // 4. Ранжируем результаты по фонетическому сходству
+    const rankedFamilies = families
+      .map(family => ({
+        family,
+        similarity: this.phoneticService.getSimilaritySync(inputTail, family.phoneticTail),
+      }))
+      .filter(item => item.similarity >= 0.5) // Минимальный порог
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, limit)
+      .map(item => item.family);
+
+    return rankedFamilies;
+  }
+
+  /**
+   * Поиск рифм с расширенной информацией о сходстве
+   */
+  async searchWithSimilarity(phrase: string, limit = 10): Promise<{
+    query: {
+      phrase: string;
+      phoneticTail: string;
+    };
+    results: {
+      family: RhymeFamilyWithRelations;
+      similarity: number;
+      isExactMatch: boolean;
+    }[];
+  }> {
+    const analysis = this.phoneticService.analyzeSync(phrase);
+    
+    const families = await this.search({ phrase, limit: limit * 2 });
+    
+    const results = families.map(family => ({
+      family,
+      similarity: this.phoneticService.getSimilaritySync(
+        analysis.phoneticTail,
+        family.phoneticTail,
+      ),
+      isExactMatch: analysis.phoneticTail === family.phoneticTail,
+    }))
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, limit);
+
+    return {
+      query: {
+        phrase,
+        phoneticTail: analysis.phoneticTail,
+      },
+      results,
+    };
   }
 
   // =====================================================
@@ -238,5 +323,37 @@ export class RhymeService {
     ]);
 
     return { familiesCount, examplesCount, unitsCount, linksCount };
+  }
+
+  /**
+   * Найти или создать семейство по phoneticTail
+   */
+  async findOrCreateFamily(
+    patternText: string,
+    phoneticTail: string,
+  ): Promise<RhymeFamily> {
+    // Ищем существующее
+    const existing = await this.prisma.rhymeFamily.findFirst({
+      where: { phoneticTail },
+    });
+
+    if (existing) return existing;
+
+    // Создаём новое
+    const slug = patternText
+      .toLowerCase()
+      .replace(/[^а-яa-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .slice(0, 50);
+
+    return this.prisma.rhymeFamily.create({
+      data: {
+        slug: `${slug}-${Date.now()}`,
+        patternText,
+        phoneticKey: phoneticTail,
+        phoneticTail,
+        createdBy: 'USER',
+      },
+    });
   }
 }
