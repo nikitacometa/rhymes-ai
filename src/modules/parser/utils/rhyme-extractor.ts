@@ -134,52 +134,33 @@ function createUnit(line: ParsedLine, section: string): ExtractedRhymeUnit | nul
 /**
  * Группирует юниты и связи в семейства рифм
  * 
- * Использует Union-Find для кластеризации
+ * Группировка по phoneticTail (не Union-Find!)
+ * Union-Find создавал транзитивные связи между нерифмующимися элементами
  */
 function groupIntoFamilies(
   units: ExtractedRhymeUnit[],
   links: ExtractedRhymeLink[],
 ): ExtractedRhymeFamily[] {
-  // Union-Find структура
-  const parent: number[] = units.map((_, i) => i);
+  // Группируем юниты по phoneticTail
+  const byPhonetic = new Map<string, number[]>();
   
-  function find(x: number): number {
-    if (parent[x] !== x) {
-      parent[x] = find(parent[x]);
-    }
-    return parent[x];
-  }
-  
-  function union(x: number, y: number): void {
-    const px = find(x);
-    const py = find(y);
-    if (px !== py) {
-      parent[px] = py;
-    }
-  }
-
-  // Объединяем связанные юниты
-  for (const link of links) {
-    union(link.unitAIndex, link.unitBIndex);
-  }
-
-  // Группируем по корневому элементу
-  const groups = new Map<number, number[]>();
   for (let i = 0; i < units.length; i++) {
-    const root = find(i);
-    if (!groups.has(root)) {
-      groups.set(root, []);
+    const phonetic = units[i].phoneticTail;
+    if (!byPhonetic.has(phonetic)) {
+      byPhonetic.set(phonetic, []);
     }
-    groups.get(root)!.push(i);
+    byPhonetic.get(phonetic)!.push(i);
   }
 
-  // Создаём семейства (только из групп размером > 1)
+  // Создаём семейства только из групп с 2+ юнитами
   const families: ExtractedRhymeFamily[] = [];
   
-  for (const [, indices] of groups) {
+  for (const [phonetic, indices] of byPhonetic) {
     if (indices.length < 2) continue;
 
     const familyUnits = indices.map(i => units[i]);
+    
+    // Фильтруем связи — только между юнитами этой группы
     const familyLinks = links.filter(
       l => indices.includes(l.unitAIndex) && indices.includes(l.unitBIndex),
     );
@@ -194,7 +175,7 @@ function groupIntoFamilies(
 
     families.push({
       patternText: patternUnit.textSpan,
-      phoneticTail: patternUnit.phoneticTail,
+      phoneticTail: phonetic,
       units: familyUnits,
       links: familyLinks,
       complexity,
