@@ -169,26 +169,39 @@ function parseLine(text: string, index: number, globalIndex: number): ParsedLine
   };
 }
 
+// Частицы и междометия, которые не несут рифмообразующего значения
+const TRAILING_PARTICLES = new Set(['а', 'и', 'я', 'е', 'э', 'о', 'у', 'ы', 'ей', 'ой', 'ай', 'уй']);
+
 /**
  * Извлекает "хвост" строки — последние значимые слова
  */
 export function extractTail(text: string, maxWords = 3): string {
-  // Убираем знаки препинания в конце
-  const cleaned = text.replace(/[.,!?:;]+$/, '').trim();
+  // Убираем все знаки препинания в конце и внутри
+  let cleaned = text
+    .replace(/[.,!?:;«»"']+/g, ' ')  // Заменяем пунктуацию на пробелы
+    .replace(/\s+/g, ' ')             // Убираем множественные пробелы
+    .trim();
   
   // Разбиваем на слова
-  const words = cleaned.split(/\s+/).filter(w => w.length > 0);
+  let words = cleaned.split(/\s+/).filter(w => w.length > 0);
+  
+  if (words.length === 0) return '';
+  
+  // Убираем trailing частицы (а, и, е, и т.д.)
+  while (words.length > 1 && TRAILING_PARTICLES.has(words[words.length - 1].toLowerCase())) {
+    words.pop();
+  }
   
   if (words.length === 0) return '';
   
   // Берём последние N слов
-  const tailWords = words.slice(-maxWords);
+  let tailWords = words.slice(-maxWords);
   
-  // Если последнее слово очень короткое (предлог, частица), берём больше
+  // Если последнее слово очень короткое (предлог), берём больше контекста
   if (tailWords.length > 0 && tailWords[tailWords.length - 1].length <= 2) {
     const extraWords = words.slice(-maxWords - 1);
     if (extraWords.length > tailWords.length) {
-      return extraWords.join(' ');
+      tailWords = extraWords;
     }
   }
   

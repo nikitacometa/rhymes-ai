@@ -80,6 +80,17 @@ describe('Text Parser', () => {
       const tail = extractTail('по Ла Скала!');
       expect(tail).toBe('по Ла Скала');
     });
+
+    it('should remove trailing particles (а, и, е)', () => {
+      // "поласкала, а" должно стать "поласкала"
+      const tail = extractTail('она меня поласкала, а');
+      expect(tail).toBe('она меня поласкала');
+    });
+
+    it('should handle commas inside text', () => {
+      const tail = extractTail('После того, как она меня поласкала');
+      expect(tail).toBe('она меня поласкала');
+    });
   });
 });
 
