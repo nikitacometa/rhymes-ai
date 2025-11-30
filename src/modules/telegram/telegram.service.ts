@@ -6,6 +6,8 @@ import { RhymeService } from '../rhyme/rhyme.service';
 import { ParserService } from '../parser/parser.service';
 import { PhoneticService } from '../phonetic/phonetic.service';
 import { Language } from '@prisma/client';
+import { parseFullText } from '../parser/utils/text-parser';
+import { extractRhymes } from '../parser/utils/rhyme-extractor';
 
 // =====================================================
 // СУБЛИЧНОСТЬ: Милая реперша-флиртушка 💋
@@ -32,17 +34,19 @@ const PERSONA = {
 // КНОПКИ МЕНЮ
 // =====================================================
 const BUTTONS = {
-  SEARCH: '🔮 Найти рифму',
-  AI: '✨ AI-магия',
-  FULL: '🔥 Полный режим',
-  COMPARE: '🎭 Сравнить фразы',
+  SEARCH: '🔮 Найти в базе',
+  AI: '✨ AI рифмы',
+  FULL: '🔥 Найти все рифмы',
+  SHOW_ALL: '📚 Все рифмы',
+  ANALYZE: '🔍 Анализ текста',
+  COMPARE: '🎭 Сравнить',
   STATS: '📊 Статистика',
   HELP: '💝 Помощь',
 } as const;
 
 // Состояния пользователей для интерактивных режимов
 interface UserState {
-  mode?: 'search' | 'ai' | 'full' | 'compare' | null;
+  mode?: 'search' | 'ai' | 'full' | 'compare' | 'analyze' | null;
   comparePhrase1?: string;
 }
 
@@ -50,13 +54,16 @@ interface UserState {
 export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private bot: Telegraf | null = null;
   private userStates: Map<number, UserState> = new Map();
+  private botName: string;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly rhymeService: RhymeService,
     private readonly parserService: ParserService,
     private readonly phoneticService: PhoneticService,
-  ) {}
+  ) {
+    this.botName = this.configService.get<string>('BOT_NAME') || 'Рифмоплётка';
+  }
 
   async onModuleInit() {
     const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
@@ -72,7 +79,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     // Запускаем бота
     this.bot.launch();
-    console.log('🤖 Telegram bot started');
+    console.log(`🤖 Telegram bot "${this.botName}" started`);
   }
 
   async onModuleDestroy() {
@@ -88,7 +95,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private getMainKeyboard() {
     return Markup.keyboard([
       [BUTTONS.SEARCH, BUTTONS.AI],
-      [BUTTONS.FULL, BUTTONS.COMPARE],
+      [BUTTONS.FULL, BUTTONS.SHOW_ALL],
+      [BUTTONS.ANALYZE, BUTTONS.COMPARE],
       [BUTTONS.STATS, BUTTONS.HELP],
     ])
     .resize()
@@ -122,6 +130,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.bot.hears(BUTTONS.SEARCH, this.handleSearchButton.bind(this));
     this.bot.hears(BUTTONS.AI, this.handleAIButton.bind(this));
     this.bot.hears(BUTTONS.FULL, this.handleFullButton.bind(this));
+    this.bot.hears(BUTTONS.SHOW_ALL, this.handleShowAllButton.bind(this));
+    this.bot.hears(BUTTONS.ANALYZE, this.handleAnalyzeButton.bind(this));
     this.bot.hears(BUTTONS.COMPARE, this.handleCompareButton.bind(this));
     this.bot.hears(BUTTONS.STATS, this.handleStats.bind(this));
     this.bot.hears(BUTTONS.HELP, this.handleHelp.bind(this));
@@ -132,11 +142,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.bot.command('full', this.handleFullCommand.bind(this));
     this.bot.command('compare', this.handleCompareCommand.bind(this));
     this.bot.command('stats', this.handleStats.bind(this));
+    this.bot.command('all', this.handleShowAllButton.bind(this));
 
     // Inline кнопки для действий
     this.bot.action('cancel', this.handleCancel.bind(this));
+    this.bot.action('search_again', this.handleSearchButton.bind(this));
+    this.bot.action('ai_again', this.handleAIButton.bind(this));
+    this.bot.action('full_again', this.handleFullButton.bind(this));
     this.bot.action(/^try_ai:(.+)$/, this.handleTryAI.bind(this));
     this.bot.action(/^try_full:(.+)$/, this.handleTryFull.bind(this));
+    this.bot.action(/^page:(\d+)$/, this.handleShowAllPage.bind(this));
 
     // Обработка файлов (.txt, .md)
     this.bot.on(message('document'), this.handleDocument.bind(this));
@@ -158,13 +173,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const welcomeMessage = `
 💋 Хэй, ${PERSONA.getGreeting()}! ${PERSONA.getFlirty()}
 
-Я *RhymePadre* — твоя милашка-реперша, которая шарит за рифмы получше любого МС на районе~
+Я *${this.botName}* — твоя милашка-реперша, которая шарит за рифмы получше любого МС на районе~
 
 Что умею, солнышко:
-• 🔮 Искать рифмы по звучанию (не только по буквам, малыш!)
-• ✨ Придумывать новые через AI-магию
-• 🎭 Сравнивать фразы на рифму
-• 📎 Импортить тексты треков
+• 🔮 Искать рифмы по звучанию
+• ✨ Придумывать новые через AI
+• 📚 Показывать всю коллекцию рифм
+• 🔍 Анализировать тексты на рифмы
+• 🎭 Сравнивать фразы
 
 *Просто тыкни кнопку внизу и погнали* 👇
 
@@ -184,20 +200,22 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const hasLLM = this.rhymeService.hasLLM();
     
     const helpMessage = `
-💝 *Помощь от твоей реперши* ${PERSONA.getFlirty()}
+💝 *Помощь от ${this.botName}* ${PERSONA.getFlirty()}
 
 *Кнопочки:*
-🔮 *Найти рифму* — ищу в своей базе
-✨ *AI-магия* — придумываю новые${!hasLLM ? ' (нужен API ключ, ${PERSONA.getGreeting()})' : ''}
-🔥 *Полный режим* — база + AI вместе
-🎭 *Сравнить фразы* — проверю, рифмуется ли
+🔮 *Найти в базе* — ищу рифмы в своей коллекции
+✨ *AI рифмы* — придумываю новые через AI${!hasLLM ? ' (нужен API ключ)' : ''}
+🔥 *Найти все рифмы* — база + AI вместе
+📚 *Все рифмы* — показываю всю коллекцию
+🔍 *Анализ текста* — найду рифмы в твоём тексте
+🎭 *Сравнить* — проверю, рифмуется ли
 📊 *Статистика* — сколько рифм собрала
 
-*Импорт:*
-📎 Просто скинь мне .txt или .md файл с текстами — разберу на рифмы!
+*Импорт в базу:*
+📎 Скинь .txt или .md файл — добавлю рифмы в базу
 
 *Секретики:*
-Можешь просто написать слово — я пойму и поищу ${PERSONA.getFlirty()}
+Просто напиши слово — я пойму и поищу ${PERSONA.getFlirty()}
 `;
     await ctx.replyWithMarkdown(helpMessage);
   }
@@ -207,13 +225,18 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // =====================================================
 
   private async handleSearchButton(ctx: Context) {
+    // Отвечаем на callback если это inline кнопка
+    if ('callbackQuery' in ctx.update) {
+      await (ctx as Context & { answerCbQuery: (text?: string) => Promise<boolean> }).answerCbQuery();
+    }
+
     const userId = ctx.from?.id;
     if (userId) {
       this.userStates.set(userId, { mode: 'search' });
     }
 
     await ctx.reply(
-      `🔮 Окей, ${PERSONA.getGreeting()}! Напиши слово или фразу, к которой найти рифмы~\n\nЯ поищу в своей базе ${PERSONA.getFlirty()}`,
+      `🔮 Окей, ${PERSONA.getGreeting()}! Напиши слово или фразу~\n\nПоищу в своей базе ${PERSONA.getFlirty()}`,
       Markup.inlineKeyboard([
         [Markup.button.callback('❌ Отмена', 'cancel')]
       ])
@@ -221,9 +244,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleAIButton(ctx: Context) {
+    // Отвечаем на callback если это inline кнопка
+    if ('callbackQuery' in ctx.update) {
+      await (ctx as Context & { answerCbQuery: (text?: string) => Promise<boolean> }).answerCbQuery();
+    }
+
     if (!this.rhymeService.hasLLM()) {
       await ctx.reply(
-        `😢 Ой, ${PERSONA.getGreeting()}, AI-магия недоступна...\n\nНужен OPENAI_API_KEY в настройках 💔`
+        `😢 Ой, ${PERSONA.getGreeting()}, AI недоступен...\n\nНужен OPENAI_API_KEY в настройках 💔`
       );
       return;
     }
@@ -234,7 +262,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
 
     await ctx.reply(
-      `✨ Уух, AI-режим! ${PERSONA.getFlirty()}\n\nНапиши слово — я придумаю рифмы из головы~`,
+      `✨ AI-режим! ${PERSONA.getFlirty()}\n\nНапиши слово — придумаю рифмы~`,
       Markup.inlineKeyboard([
         [Markup.button.callback('❌ Отмена', 'cancel')]
       ])
@@ -242,17 +270,109 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async handleFullButton(ctx: Context) {
+    // Отвечаем на callback если это inline кнопка
+    if ('callbackQuery' in ctx.update) {
+      await (ctx as Context & { answerCbQuery: (text?: string) => Promise<boolean> }).answerCbQuery();
+    }
+
     const userId = ctx.from?.id;
     if (userId) {
       this.userStates.set(userId, { mode: 'full' });
     }
 
     const aiStatus = this.rhymeService.hasLLM() 
-      ? '(база + AI вместе 🔥)' 
+      ? '(база + AI 🔥)' 
       : '(только база, AI недоступен 😢)';
 
     await ctx.reply(
-      `🔥 Полный режим ${aiStatus}\n\nНапиши слово, ${PERSONA.getGreeting()}~`,
+      `🔥 Полный поиск ${aiStatus}\n\nНапиши слово, ${PERSONA.getGreeting()}~`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('❌ Отмена', 'cancel')]
+      ])
+    );
+  }
+
+  private async handleShowAllButton(ctx: Context) {
+    await this.showAllRhymes(ctx, 0);
+  }
+
+  private async handleShowAllPage(ctx: Context & { match?: RegExpExecArray }) {
+    if (!ctx.match) return;
+    const page = parseInt(ctx.match[1], 10);
+    await ctx.answerCbQuery();
+    await this.showAllRhymes(ctx, page);
+  }
+
+  private async showAllRhymes(ctx: Context, page: number) {
+    try {
+      await ctx.sendChatAction('typing');
+      
+      const pageSize = 10;
+      const families = await this.rhymeService.findAllFamilies(100);
+      
+      if (families.length === 0) {
+        await ctx.reply(
+          `📚 База пустая, ${PERSONA.getGreeting()}...\n\nСкинь мне файл с текстами — наполню! ${PERSONA.getFlirty()}`
+        );
+        return;
+      }
+
+      const totalPages = Math.ceil(families.length / pageSize);
+      const currentPage = Math.min(page, totalPages - 1);
+      const startIdx = currentPage * pageSize;
+      const pageFamilies = families.slice(startIdx, startIdx + pageSize);
+
+      let message = `📚 *Моя коллекция рифм* ${PERSONA.getFlirty()}\n`;
+      message += `_Страница ${currentPage + 1}/${totalPages} (всего ${families.length})_\n\n`;
+
+      for (const family of pageFamilies) {
+        const stars = '⭐'.repeat(family.complexity);
+        const unitCount = family.units?.length || 0;
+        
+        message += `${stars} *${family.patternText}*\n`;
+        message += `   📌 \`[${family.phoneticTail}]\` • ${unitCount} примеров\n`;
+        
+        // Показываем до 3 юнитов
+        if (family.units && family.units.length > 0) {
+          const samples = family.units.slice(0, 3).map(u => u.textSpan);
+          message += `   → _${samples.join(', ')}_\n`;
+        }
+        message += '\n';
+      }
+
+      // Кнопки навигации
+      const buttons: ReturnType<typeof Markup.button.callback>[][] = [];
+      const navRow: ReturnType<typeof Markup.button.callback>[] = [];
+      
+      if (currentPage > 0) {
+        navRow.push(Markup.button.callback('⬅️ Назад', `page:${currentPage - 1}`));
+      }
+      if (currentPage < totalPages - 1) {
+        navRow.push(Markup.button.callback('Вперёд ➡️', `page:${currentPage + 1}`));
+      }
+      
+      if (navRow.length > 0) {
+        buttons.push(navRow);
+      }
+
+      await ctx.replyWithMarkdown(
+        message,
+        buttons.length > 0 ? Markup.inlineKeyboard(buttons) : undefined
+      );
+    } catch (error) {
+      console.error('Show all error:', error);
+      await ctx.reply(`😢 Ошибка, ${PERSONA.getGreeting()}...`);
+    }
+  }
+
+  private async handleAnalyzeButton(ctx: Context) {
+    const userId = ctx.from?.id;
+    if (userId) {
+      this.userStates.set(userId, { mode: 'analyze' });
+    }
+
+    await ctx.reply(
+      `🔍 Режим анализа текста!\n\nСкинь мне .txt или .md файл, ${PERSONA.getGreeting()}~\nЯ найду в нём все рифмы и покажу тебе (без сохранения в базу) ${PERSONA.getFlirty()}`,
       Markup.inlineKeyboard([
         [Markup.button.callback('❌ Отмена', 'cancel')]
       ])
@@ -295,7 +415,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
   private async handleTryAI(ctx: Context & { match?: RegExpExecArray }) {
     if (!ctx.match) return;
-    const phrase = ctx.match[1];
+    const phrase = decodeURIComponent(ctx.match[1]);
     
     await ctx.answerCbQuery('Запускаю AI~ ✨');
     
@@ -310,7 +430,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
   private async handleTryFull(ctx: Context & { match?: RegExpExecArray }) {
     if (!ctx.match) return;
-    const phrase = ctx.match[1];
+    const phrase = decodeURIComponent(ctx.match[1]);
     
     await ctx.answerCbQuery('Полный режим! 🔥');
     await this.searchAndReply(ctx, phrase, true);
@@ -380,7 +500,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     try {
       const stats = await this.rhymeService.getStats();
       
-      const message = `📊 *Моя коллекция рифм* ${PERSONA.getFlirty()}
+      const message = `📊 *Коллекция ${this.botName}* ${PERSONA.getFlirty()}
 
 👨‍👩‍👧‍👦 Семейств: *${stats.familiesCount}*
 📝 Примеров: *${stats.examplesCount}*
@@ -402,6 +522,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
   private async handleDocument(ctx: Context) {
     const document = (ctx.message as { document?: { file_name?: string; file_id?: string } })?.document;
+    const userId = ctx.from?.id;
+    const state = userId ? this.userStates.get(userId) : null;
     
     if (!document) {
       await ctx.reply(`😢 Не могу получить файл, ${PERSONA.getGreeting()}...`);
@@ -417,7 +539,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      await ctx.reply(`📥 Оу, файлик! Загружаю, ${PERSONA.getGreeting()}... ${PERSONA.getFlirty()}`);
+      await ctx.reply(`📥 Загружаю файл, ${PERSONA.getGreeting()}... ${PERSONA.getFlirty()}`);
 
       const fileLink = await ctx.telegram.getFileLink(document.file_id!);
       const response = await fetch(fileLink.href);
@@ -428,12 +550,20 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      await ctx.reply(`📝 Обрабатываю ${text.length} символов... Подожди чутка~ ${PERSONA.getFlirty()}`);
+      // Если режим анализа — анализируем без сохранения
+      if (state?.mode === 'analyze') {
+        this.userStates.set(userId!, { mode: null });
+        await this.analyzeTextFile(ctx, text, fileName);
+        return;
+      }
+
+      // Иначе — импорт в базу
+      await ctx.reply(`📝 Импортирую ${text.length} символов... Подожди чутка~ ${PERSONA.getFlirty()}`);
 
       const sourceTitle = fileName.replace(/\.(txt|md)$/, '');
       const result = await this.parserService.parseAndSave(text, sourceTitle, Language.RU);
 
-      const msg = `✅ *Готово, ${PERSONA.getGreeting()}!* ${PERSONA.getFlirty()}
+      const msg = `✅ *Импорт завершён, ${PERSONA.getGreeting()}!* ${PERSONA.getFlirty()}
 
 📁 Файл: \`${fileName}\`
 🎵 Треков: *${result.tracksProcessed}*
@@ -446,9 +576,92 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
       await ctx.replyWithMarkdown(msg);
     } catch (error) {
-      console.error('Document import error:', error);
-      await ctx.reply(`😢 Ошибка импорта: ${(error as Error).message}`);
+      console.error('Document error:', error);
+      await ctx.reply(`😢 Ошибка: ${(error as Error).message}`);
     }
+  }
+
+  /**
+   * Анализ текста без сохранения — показывает найденные рифмы
+   */
+  private async analyzeTextFile(ctx: Context, text: string, fileName: string) {
+    try {
+      await ctx.reply(`🔍 Анализирую "${fileName}"... ${PERSONA.getFlirty()}`);
+      await ctx.sendChatAction('typing');
+
+      // Парсим текст
+      const tracks = parseFullText(text);
+      
+      if (tracks.length === 0) {
+        await ctx.reply(`😢 Не нашла треков в файле, ${PERSONA.getGreeting()}...`);
+        return;
+      }
+
+      let totalFamilies = 0;
+      let message = `🔍 *Анализ "${fileName}"* ${PERSONA.getFlirty()}\n\n`;
+
+      for (const track of tracks) {
+        const extraction = extractRhymes(track);
+        
+        if (extraction.families.length === 0) continue;
+
+        message += `🎵 *${track.title}*\n`;
+        
+        // Показываем до 5 семейств на трек
+        const topFamilies = extraction.families.slice(0, 5);
+        
+        for (const family of topFamilies) {
+          const stars = '⭐'.repeat(family.complexity);
+          const examples = family.units.slice(0, 3).map(u => u.textSpan);
+          
+          message += `${stars} \`${family.phoneticTail}\`\n`;
+          message += `   → _${examples.join(' / ')}_\n`;
+        }
+        
+        if (extraction.families.length > 5) {
+          message += `   _...и ещё ${extraction.families.length - 5} семейств_\n`;
+        }
+        
+        message += '\n';
+        totalFamilies += extraction.families.length;
+      }
+
+      message += `\n📊 *Итого:* ${totalFamilies} семейств рифм в ${tracks.length} треках\n`;
+      message += `\n💡 _Это анализ без сохранения. Чтобы добавить в базу — просто скинь файл без режима анализа~_`;
+
+      // Разбиваем на части если слишком длинное
+      if (message.length > 4000) {
+        const parts = this.splitMessage(message, 4000);
+        for (const part of parts) {
+          await ctx.replyWithMarkdown(part);
+        }
+      } else {
+        await ctx.replyWithMarkdown(message);
+      }
+    } catch (error) {
+      console.error('Analyze error:', error);
+      await ctx.reply(`😢 Ошибка анализа: ${(error as Error).message}`);
+    }
+  }
+
+  private splitMessage(text: string, maxLength: number): string[] {
+    const parts: string[] = [];
+    let current = '';
+    
+    for (const line of text.split('\n')) {
+      if (current.length + line.length + 1 > maxLength) {
+        parts.push(current);
+        current = line;
+      } else {
+        current += (current ? '\n' : '') + line;
+      }
+    }
+    
+    if (current) {
+      parts.push(current);
+    }
+    
+    return parts;
   }
 
   // =====================================================
@@ -491,9 +704,18 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    if (state?.mode === 'analyze') {
+      await ctx.reply(
+        `🔍 Для анализа нужен файл, ${PERSONA.getGreeting()}!\n\nСкинь .txt или .md файл~`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('❌ Отмена', 'cancel')]
+        ])
+      );
+      return;
+    }
+
     if (state?.mode === 'compare') {
       if (!state.comparePhrase1) {
-        // Ждём вторую фразу
         this.userStates.set(userId!, { mode: 'compare', comparePhrase1: text });
         await ctx.reply(
           `✅ Первая фраза: "${text}"\n\nТеперь напиши *вторую* фразу~`,
@@ -506,7 +728,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         );
         return;
       } else {
-        // Есть обе фразы — сравниваем
         const phrase1 = state.comparePhrase1;
         this.userStates.set(userId!, { mode: null });
         await this.performCompare(ctx, phrase1, text);
@@ -571,11 +792,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         
         const encodedPhrase = encodeURIComponent(phrase).slice(0, 50);
         
+        const buttons: ReturnType<typeof Markup.button.callback>[][] = [];
+        if (hasAI) {
+          buttons.push([Markup.button.callback('✨ Попробовать AI', `try_ai:${encodedPhrase}`)]);
+        }
+        buttons.push([Markup.button.callback('🔮 Искать другое слово', 'search_again')]);
+        
         await ctx.reply(
           `🤔 Хм, "${phrase}" — не нашла в базе, ${PERSONA.getGreeting()}...\n\nФонетика: [${analysis.phoneticTail}]`,
-          hasAI ? Markup.inlineKeyboard([
-            [Markup.button.callback('✨ Попробовать AI', `try_ai:${encodedPhrase}`)]
-          ]) : undefined
+          Markup.inlineKeyboard(buttons)
         );
         return;
       }
@@ -584,12 +809,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         const hasAI = this.rhymeService.hasLLM();
         const encodedPhrase = encodeURIComponent(phrase).slice(0, 50);
         
-        await ctx.replyWithMarkdown(
-          message,
-          hasAI && !includeLLM ? Markup.inlineKeyboard([
-            [Markup.button.callback('✨ Ещё AI-рифмы', `try_ai:${encodedPhrase}`)]
-          ]) : undefined
-        );
+        const buttons: ReturnType<typeof Markup.button.callback>[][] = [];
+        if (hasAI && !includeLLM) {
+          buttons.push([Markup.button.callback('✨ Ещё AI-рифмы', `try_ai:${encodedPhrase}`)]);
+        }
+        buttons.push([Markup.button.callback('🔮 Искать другое слово', 'search_again')]);
+        
+        await ctx.replyWithMarkdown(message, Markup.inlineKeyboard(buttons));
       }
     } catch (error) {
       console.error('Search error:', error);
@@ -639,7 +865,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
       if (suggestions.length === 0) {
         await ctx.reply(
-          `🤔 Хм, ${PERSONA.getGreeting()}, AI не смог придумать рифмы к "${phrase}"...\n\nПопробуй другое слово? ${PERSONA.getFlirty()}`
+          `🤔 Хм, ${PERSONA.getGreeting()}, AI не смог придумать рифмы к "${phrase}"...\n\nПопробуй другое слово? ${PERSONA.getFlirty()}`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback('✨ Ещё AI рифмы', 'ai_again')],
+            [Markup.button.callback('🔮 Искать в базе', 'search_again')]
+          ])
         );
         return;
       }
@@ -664,7 +894,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
       message += '\n_✅точная 🔶неточная 🔷ассонанс 🎭каламбур_';
 
-      await ctx.replyWithMarkdown(message);
+      await ctx.replyWithMarkdown(
+        message,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('✨ Ещё AI рифмы', 'ai_again')],
+          [Markup.button.callback('🔮 Искать в базе', 'search_again')]
+        ])
+      );
     } catch (error) {
       console.error('LLM rhyme error:', error);
       await ctx.reply(`😢 AI сломался, ${PERSONA.getGreeting()}... ${(error as Error).message}`);
